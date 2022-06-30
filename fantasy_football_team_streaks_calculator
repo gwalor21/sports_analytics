@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Feb 11 21:38:56 2021
+
+@author: gwalor
+"""
+
+# This script is designed to take game results for a fantasy league, and then bucket different win and losing streaks for each team owner
+# For example, team 1 might have 3 win streaks of W1, 5 of W2, and 1 of W10, etc.
+
+# Initialize packages
+import pandas as pd
+
+# Read in all necessary files (example file here)
+game_log_file = 'weekly_game_log_master.csv'
+
+game_log = pd.read_csv(game_log_file)
+
+df1 = pd.DataFrame(game_log)
+df1 = df1.sort_values(['Owner', 'Year', 'Week'], ascending = (True, True, True))
+df1 = df1[['Game ID', 'Owner', 'Year', 'Week', 'Result', 'Logo']]
+
+# Modifying code from this blog write-up to calculate streaks, adapting from free throw streaks to win streaks for our league
+
+#https://joshdevlin.com/blog/calculate-streaks-in-pandas/
+
+
+# Get owner names into list
+owner_list = ['Team 1',
+ 'Team 2',
+ 'Team 3',
+ 'Team 4',
+ 'Team 5',
+ 'Team 6',
+ 'Team 7',
+ 'Team 8',
+ 'Team 9',
+ 'Team 10']
+
+
+# Get unique years into list
+year_list = df1['Year'].unique().tolist()
+
+# Function that filters data by owner/year
+def filtered_results(owner, year):
+    """
+    returns game results for a specific owner and year
+    Parameters
+    ----------
+    owner : string
+        one of the owners in the fantasy league
+    year : int
+        the year in which the league was played
+
+    Returns
+    -------
+    owner_results
+        A filtered dataframe of owner results for a given year
+
+    """
+    
+    # filter the data
+    filt = (df1['Owner'] == owner) & (df1['Year'] == year)
+    owner_results = df1[filt]
+    owner_results = owner_results.reset_index(drop=True)
+    
+    # check to make sure the owner has some records
+    if not owner_results.shape[0]:
+        pass
+
+    return owner_results
+
+# function that generates streak length
+    
+def generate_streak_info(filtered_results):
+    """
+    Parameters
+    ----------
+    
+    filtered_results:
+        A dataframe containing data about owner wins and losses.
+        Must contain a `results` column with two
+        unique values for won and lost games.
+        Must be pre-sorted by time.
+
+    Returns
+    -------
+
+    result_streak:
+        The original dataframe with a new column
+        `streak_counter` containing integers with 
+        counts for each streak.
+    """
+    
+    data = filtered_results['Result'].to_frame()
+    data['start_of_streak'] = data['Result'].ne(data['Result'].shift())
+    data['streak_id'] = data.start_of_streak.cumsum()
+    data['streak_counter'] = data.groupby('streak_id').cumcount() + 1
+    result_streak = pd.concat([filtered_results, data['streak_counter']], axis=1)
+    return result_streak
+
+
+def streak_summary(result_streak):
+    """
+    Parameters
+    ----------
+    
+    result_streak:
+        A DataFrame containing data about
+        win/loss streaks.
+        
+        Must contain the following columns:
+        
+        Owner:
+            The name of the owner
+        Year:
+            League year.
+        Week:
+            League week.
+        Result:
+            If the week was won or lost.
+        streak_counter:
+            Consecutive tally based on the results.
+
+    Returns
+    -------
+
+    summary:
+        A DataFrame summarizing the win/loss streaks,
+        containing the columns: `Owner`, 
+        `Year`, `streak_type`, `streak_length`.
+    """
+    
+    # calculate raw streak data
+    summary = generate_streak_info(result_streak)
+    
+    # streak start and end booleans
+    summary['start_of_streak'] = summary['streak_counter'] == 1
+    summary['end_of_streak'] = summary['start_of_streak'].shift(-1, fill_value=True)
+    
+    # Filter out and return only end_streak_results
+    summary = summary[summary['end_of_streak'] == True] 
+    summary['streak'] = summary['Result'] + summary['streak_counter'].astype(str)
+    summary = summary[['Owner', 'Year', 'streak']]
+    
+    return summary
+
+final_output = pd.DataFrame()
+
+# putting it all together
+
+for i in range(len(owner_list)):
+    for j in range(len(year_list)):
+        filt_owner_results = filtered_results(owner_list[i],year_list[j])
+        loop_output = streak_summary(filt_owner_results)
+        final_output = pd.concat([final_output, loop_output])
+
+final_output
+
+#final_output.to_csv(r'ffl_streak_data.csv')
+    
+
