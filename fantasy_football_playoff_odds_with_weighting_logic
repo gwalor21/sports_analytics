@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Nov 17 22:41:06 2020
+
+@author: gwalor
+"""
+
+# Purpose of this Python script is to generate league playoff probability for all teams, including the likelihood of receiving a bye
+
+# Initialize packages
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+import time
+import collections
+
+# High level variables
+n_sims = 1000
+playoff_team_list = []
+bye_team_list = []
+playoff_counter = {}
+bye_counter = {}
+
+# Typical file placeholder variables
+
+team_scoring_file = 'ff_2021_scoring_results.csv'
+standings_file = 'ff_2021_standings.csv'
+matchups_ros_file = 'ff_2021_remaining_matchups.csv'
+
+
+# Read in all necessary files
+team_scoring = pd.read_csv(team_scoring_file)
+standings = pd.read_csv(standings_file)
+matchups_ros = pd.read_csv(matchups_ros_file)
+
+# Set indexes to team names
+team_scoring = team_scoring.set_index('Team')
+standings = standings.set_index('Owner')
+
+# Get mean and median scoring by team, then get standard deviation for each group
+team_means = team_scoring.mean(axis=1)
+team_medians = team_scoring.median(axis=1)
+team_std = team_scoring.std(axis=1)
+team_sum = team_scoring.sum(axis=1)
+
+# Merge into one dataframe
+df = pd.concat([team_means, team_medians], axis=1)
+df = pd.concat([df, team_std], axis=1)
+df = pd.concat([df, team_sum], axis=1)
+
+# Column renaming and formatting for joins later
+column_names = df.columns.values
+column_names = list(column_names)
+column_names[0] = 'mean'
+column_names[1] = 'median'
+column_names[2] = 'std'
+column_names[3] = 'sum'
+
+df.columns = column_names
+
+### NEW SECTION - ADDING IN WEIGHTED AVERAGE AND WEIGHTED VARIANCE #####
+
+# Determine how many weeks are in the file
+
+scored_weeks = len(team_scoring.columns)
+
+start_interval = 1
+end_interval = scored_weeks / 2
+interval_width = (end_interval - start_interval) / (scored_weeks - 1)
+
+# Assign weighted function to increase weight over each week (i.e. 1/66, 2/66, 3/66 for 11 weeks into the season)
+# Like this article - https://blog.earn2trade.com/weighted-moving-average/
+# Modified the weighting calculation so it's a bit more conservative across the spread of weeks
+# i.e. not creating a 12x gap between week 1 and week 12 (more like a 6x gap) to account for how a team is performing later in the season
+# with injuries and other factors
+
+array_weights = []
+week_index = []
+
+# Creates array of weights
+for x in range(scored_weeks):
+    if x == 0:
+        week_weight = 1
+        array_weights.append(week_weight)
+        week_index.append(week_weight)
+    else:
+        week_weight = 1 + (interval_width * x)
+        array_weights.append(week_weight)
+        week_weight = x + 1
+        week_index.append(week_weight)
+        week_weight = 0
+    
+# Separate weighted_average calculation to get dataframe to merge later
+team_scoring_temp = team_scoring.reset_index()
+week_columns_vars = team_scoring.columns.values
+team_scoring_pivot = pd.melt(team_scoring_temp, id_vars=['Team'], value_vars=week_columns_vars, var_name='Week', value_name='Score')
+team_scoring_pivot['Week'] = team_scoring_pivot['Week'].astype(str).astype(int)
+
+# Join array_weights to pivoted dataframe
+
+df_weights = pd.DataFrame(
+    {'week': week_index,
+     'weight': array_weights,
+    })
+
+df_scoring_weights = pd.merge(team_scoring_pivot, df_weights, how = "left", left_on=['Week'], right_on=['week'])
+
+# Create a function that sets the weighted average for a group
+
+def w_avg(df, values, weights):
+    d = df[values]
+    w = df[weights]
+    return (d * w).sum() / w.sum()
+
+team_weighted_mean = df_scoring_weights.groupby('Team').apply(w_avg, 'Score', 'weight')
+team_weighted_mean = team_weighted_mean.to_frame(name='Team')
+team_weighted_mean = team_weighted_mean.set_axis(['weighted_average'], axis='columns')
+
+def w_std(df, values, weights):
+    d = df[values]
+    w = df[weights]
+    w_avg = (d * w).sum() / w.sum()
+    w_var = np.sum(w * (d - w_avg)**2)/np.sum(w)
+    return np.sqrt(w_var)
+
+team_weighted_std = df_scoring_weights.groupby('Team').apply(w_std, 'Score', 'weight')
+
+# Adding in weighted average and weighted standard deviation (std) to dataframe
+df = pd.merge(df, team_weighted_mean, how = "left", left_on=['Team'], right_on=['Team'])
+df = pd.merge(df, team_weighted_std.to_frame(), how = "left", left_on=['Team'], right_on=['Team'])
+
+# More column renaming
+column_names = df.columns.values
+column_names = list(column_names)
+column_names[4] = 'weighted_mean'
+column_names[5] = 'weighted_std'
+
+df.columns = column_names
+
+# Starting counter number
+sim = 0
+
+for sim in range(n_sims):
+    
+    # Get results for all 3 weeks per player
+
+    owner_score_list = []
+    owner_list = [['Team 1'], ['Team 2'], ['Team 3'], ['Team 4'], ['Team 5'], ['Team 6'], ['Team 7'], ['Team 8'], ['Team 9'], ['Team 10']]
+
+    remain_wks = 2
+
+    #### ADDITIONAL LOOP LOGIC HERE
+
+    for i in range(len(owner_list)):
+        owner_score_list = []
+        for j in range(remain_wks):
+            s = round(float(stats.truncnorm.rvs(-1, 1, loc=df.weighted_mean[i], scale=df.weighted_std[i], size=1)),2)
+            owner_score_list.append(s)
+        owner_list[i].append(owner_score_list)
+    
+    # Reformatting output scoring table
+    
+    ros_df = pd.DataFrame(columns=['Team', 'Scores'], data=owner_list)
+
+    ros_df[[13, 14]] = pd.DataFrame(ros_df.Scores.tolist(), index=ros_df.index)
+    ros_df2 = ros_df[['Team', 13, 14]]
+    ros_df2 = ros_df2.T
+    ros_df2 = ros_df2.T
+
+    time.sleep(3)
+
+    ros_df2 = pd.melt(ros_df2, id_vars=['Team'], value_name='Week')
+    ros_df2 = ros_df2.rename(columns={"Team": "Team", "variable": "Week", "Week": "Score"})
+
+    # Merge in generated score values
+    ros_output = pd.merge(matchups_ros, ros_df2, how = "left", left_on=['Week', 'Owner1'], right_on=['Week', 'Team'])
+    ros_output2 = pd.merge(ros_output, ros_df2, how = "left", left_on=['Week', 'Owner2'], right_on=['Week', 'Team'])
+    
+    # Now we compare to see who wins!
+    ros_output2['winner'] = np.where(ros_output2['Score_x'] > ros_output2['Score_y'], ros_output2['Owner1'], ros_output2['Owner2']) 
+ 
+    # Get count of winner names
+    sim_wins = ros_output2['winner'].value_counts()
+    sim_wins = sim_wins.reset_index()
+    
+    standings2 = standings.reset_index()
+
+    # Adding wins to the standings
+    df_standings = pd.merge(standings2, sim_wins, how = "left", left_on = 'Owner', right_on='index')
+    df_standings = df_standings.fillna(0)
+    df_standings['final_wins'] = df_standings['Wins'] + df_standings['winner']
+
+    # Building total points for tiebreakers
+    ros_df_total_points = ros_df[['Team',13,14]]
+    ros_df_total_points['ros_points'] = ros_df_total_points[13] + ros_df_total_points[14]
+
+    # Left join in scoring data
+    team_sum_tiebreaker = team_sum.reset_index()
+    df_teampoints_ros = pd.merge(team_sum_tiebreaker, ros_df_total_points, how = "left", left_on = 'Team', right_on = 'Team')
+    df_teampoints_ros['total_points'] = df_teampoints_ros[0] + df_teampoints_ros['ros_points']
+    df_tp = df_teampoints_ros[['Team', 'total_points']]
+
+    df_standings_fin = pd.merge(df_standings, df_tp, how = 'left', left_on = 'Owner', right_on = 'Team')
+    df_standings_fin = df_standings_fin[['Owner', 'final_wins', 'total_points']]
+
+    df_standings_fin["rank"] = df_standings_fin[["final_wins","total_points"]].apply(tuple,axis=1).rank(method='dense',ascending=False).astype(int)
+    df_standings_fin = df_standings_fin.sort_values("rank")
+
+    df_standings_fin['playoffs'] = np.where(df_standings_fin['rank'] <= 6, True, False) 
+    df_standings_fin['bye'] = np.where(df_standings_fin['rank'] <= 2, True, False) 
+
+
+    # Add player, then increment total playoffs and bye number
+    playoff_teams = df_standings_fin[df_standings_fin['playoffs'] == True]
+    playoff_teams = list(playoff_teams['Owner'])
+    playoff_team_list.append(playoff_teams)
+
+    # Append to list
+
+    bye_teams = df_standings_fin[df_standings_fin['bye'] == True]
+    bye_teams = list(bye_teams['Owner'])
+    bye_team_list.append(bye_teams)
+
+
+    # Progress reporting
+    if (sim % 10) == 0:
+        print("On simulation #" + str(sim))
+
+# outside of loop, take final list and tally by person       
+# first need to flatten list of lists generated by the code above
+
+playoff_flat_list = []
+for sublist in playoff_team_list:
+    for item in sublist:
+        playoff_flat_list.append(item)
+        
+playoff_counter = collections.Counter(playoff_flat_list)
+
+
+bye_flat_list = []
+for sublist in bye_team_list:
+    for item in sublist:
+        bye_flat_list.append(item)
+        
+bye_counter = collections.Counter(bye_flat_list)
+ 
+    
+# To-do: Print results in output file
